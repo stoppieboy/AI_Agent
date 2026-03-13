@@ -5,6 +5,7 @@ import path from 'path';
 import OpenAI from 'openai';
 import * as lancedb from '@lancedb/lancedb';
 import * as arrow from 'apache-arrow';
+import { randomUUID } from 'node:crypto';
 
 const DATA_DIR = './docs';
 const EMBEDDING_MODEL =
@@ -23,6 +24,7 @@ export async function ingest() {
     input: 'dimension probe',
   });
   const dims = probe.data[0]?.embedding.length;
+  if (!dims) throw new Error('Could not determine embedding dimensions — check that the embedding model is running.');
 
   // 1) Connect to LanceDB
   const db = await lancedb.connect('./data/lancedb');
@@ -58,39 +60,61 @@ export async function ingest() {
   }
 
   // 4) Walk files and add chunked rows with fresh embeddings
-  const files = fs
-    .readdirSync(DATA_DIR, { withFileTypes: true })
+  const dirents = await fs.promises.readdir(DATA_DIR, { withFileTypes: true });
+  const files = dirents
     .filter((f) => f.isFile())
     .map((f) => f.name)
     .filter((f) => /\.(md|txt|pdf|csv|log|json)$/i.test(f));
 
   for (const file of files) {
-    const content = fs.readFileSync(path.join(DATA_DIR, file), 'utf8');
-    const chunks = chunkText(content, 1200, 200);
+    try {
+      // Deduplicate: remove any previously ingested chunks for this file
+      await deleteChunksByFile(table, file);
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
+      const content = await fs.promises.readFile(path.join(DATA_DIR, file), 'utf8');
+      const chunks = chunkText(content, 1200, 200).filter((c) => c.trim().length > 0);
 
-      const emb = await client.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: chunk || [],
-      });
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        if (!chunk) continue;
 
-      const vector = emb.data[0]?.embedding.map((x) => x as number); // Float32 later
+        const emb = await client.embeddings.create({
+          model: EMBEDDING_MODEL,
+          input: chunk,
+        });
 
-      await table.add([
-        {
-          id: cryptoRandom(),
-          text: chunk,
-          vector,
-          file,
-          chunk: i,
-        },
-      ]);
+        const vector = emb.data[0]?.embedding.map((x) => x as number);
+
+        await table.add([
+          {
+            id: cryptoRandom(),
+            text: chunk,
+            vector,
+            file,
+            chunk: i,
+          },
+        ]);
+      }
+    } catch (err) {
+      console.error(`[ingest] Skipping "${file}" due to error:`, err);
     }
   }
 
   console.log('Ingest complete');
+}
+
+async function deleteChunksByFile(table: any, filename: string): Promise<number> {
+  const before = await table.countRows();
+  await table.delete(`file = '${filename.replace(/'/g, "''")}'`);
+  const after = await table.countRows();
+  return before - after;
+}
+
+/** Remove all RAG chunks for a specific document filename. */
+export async function forgetDocument(filename: string): Promise<number> {
+  const db = await lancedb.connect('./data/lancedb');
+  const table = await db.openTable('chunks');
+  return deleteChunksByFile(table, filename);
 }
 
 function chunkText(text: string, size = 1000, overlap = 100): string[] {
@@ -104,15 +128,14 @@ function chunkText(text: string, size = 1000, overlap = 100): string[] {
 }
 
 function cryptoRandom() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return randomUUID();
 }
 
 // If you want to run directly: `npx ts-node --esm src/rag/ingest.ts`
-if (process.argv[1]?.endsWith('ingest.ts')) {
+if (process.argv[1]?.endsWith('ingest.ts') || process.argv[1]?.endsWith('ingest.js')) {
   ingest().catch((e) => {
     console.error(e);
     process.exit(1);
   });
 }
 
-// ingest().catch(console.error)

@@ -62,10 +62,11 @@ app.post('/chat/stream', async (req, res) => {
 });
 
 // ---- Agent turn (with tools + optional RAG) ----
+// Body: { userInput: string, history?: Array<{role, content}> }
 app.post('/agent', async (req, res) => {
   try {
-    const { userInput } = req.body;
-    const answer = await runAgentTurn(userInput);
+    const { userInput, history } = req.body;
+    const answer = await runAgentTurn(userInput, history ?? []);
     res.json({ answer });
   } catch (err: any) {
     console.error(err);
@@ -82,6 +83,23 @@ app.get('/ingest', async (req, res) => {
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: err?.message || 'ingest_error' });
+  }
+});
+
+// ---- Forget a document from RAG ----
+app.delete('/ingest/:filename', async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    if (!filename || /[\/\\]/.test(filename)) {
+      res.status(400).json({ error: 'Invalid filename' });
+      return;
+    }
+    const { forgetDocument } = await import('./rag/ingest.js');
+    const removed = await forgetDocument(filename);
+    res.json({ filename, removed });
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: err?.message || 'forget_error' });
   }
 });
 

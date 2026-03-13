@@ -31,10 +31,12 @@ export const remove_from_memory = {
     }
 }
 
-export async function saveToMemory(key: string, value: string) {
-  return remember(key, value);
+export async function saveToMemory(key: string, value: string): Promise<string> {
+  remember(key, value);
+  return `Saved "${key}" to memory.`;
 }
 
-export async function removeFromMemory(key: string) {
-  return forget(key);
+export async function removeFromMemory(key: string): Promise<string> {
+  forget(key);
+  return `Removed "${key}" from memory.`;
 }
