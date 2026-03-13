@@ -6,6 +6,7 @@ import { run_read_file, read_file, create_file, run_create_file } from './tools/
 import { recallAll } from './memory/longterm.js';
 import { retrieveSimilar } from './rag/retriever.js';
 import { remove_from_memory, removeFromMemory, save_to_memory, saveToMemory } from './tools/memory.js';
+import { forget_document, run_forget_document, ingest_documents, run_ingest_documents } from './tools/rag.js';
 import {promises as fs} from 'fs';
 
 const client = new OpenAI({
@@ -46,11 +47,16 @@ const TOOLS = [
   save_to_memory,
   remove_from_memory,
   create_file,
+  forget_document,
+  ingest_documents,
 ];
 
-export async function runAgentTurn(userInput: string): Promise<string> {
-  const memory = (recallAll() as { key: string; value: string }[])
-    .map((m) => `- ${m.key}: ${m.value}`)
+const MAX_TOOL_ROUNDS = 8;
+
+export async function runAgentTurn(userInput: string, history: Msg[] = []): Promise<string> {
+  // Build memory context
+  const memoryEntries = (recallAll() as { key: string; value: string }[])
+    .map((m) => `  - ${m.key}: ${m.value}`)
     .join('\n');
 
   // Optional RAG: fetch top-k chunks related to the query
@@ -58,88 +64,85 @@ export async function runAgentTurn(userInput: string): Promise<string> {
   try {
     const top = await retrieveSimilar(userInput, 5);
     if (top?.length) {
-      ragContext =
-        `\n\nRelevant context (use if helpful):\n---\n${top.join('\n---\n')}\n---\n`;
+      ragContext = top.join('\n---\n');
     }
   } catch {
-    // RAG is optional; ignore errors
     console.error('RAG retrieval failed, continuing without context.');
   }
 
-  const messages: Msg[] = [
-    SYSTEM,
-    {
-      role: 'user',
-      content:
-        `Here is the user's request:\n${userInput}\n\n` +
-        (memory ? `Known user memory:\n${memory}\n\n` : '') +
-        ragContext,
-    },
-  ];
+  // Inject memory and RAG as a separate context message so the user turn stays clean
+  const contextParts: string[] = [];
+  if (memoryEntries) contextParts.push(`<memory>\n${memoryEntries}\n</memory>`);
+  if (ragContext) contextParts.push(`<knowledge>\n${ragContext}\n</knowledge>`);
 
-  console.log('Messages sent to model:', messages);
+  const messages: Msg[] = [SYSTEM];
 
-  // 1) Ask the model with tool definitions
-  const first = await client.chat.completions.create({
-    model: MODEL,
-    messages: messages as any,
-    tools: TOOLS as any,
-    temperature: 0.2,
-  });
+  if (contextParts.length > 0) {
+    messages.push({
+      role: 'system',
+      content: `Context for this conversation:\n${contextParts.join('\n\n')}`,
+    });
+  }
 
-  console.log('Model initial response:', first.choices?.[0]?.message);
+  // Append prior conversation turns, then the new user message
+  messages.push(...history, { role: 'user', content: userInput });
 
-  // 2) Handle tool calls (if any)
-  const toolCalls = first.choices?.[0]?.message?.tool_calls || [];
-  if (toolCalls.length > 0) {
-    const toolResults: Msg[] = [];
+  // Agentic loop: keep calling tools until the model returns a plain text answer
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    console.log(`[agent] round ${round + 1}, messages: ${messages.length}`);
 
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      messages: messages as any,
+      tools: TOOLS as any,
+      temperature: 0.3,
+    });
+
+    const assistantMsg = response.choices[0]?.message;
+    if (!assistantMsg) break;
+
+    const toolCalls = assistantMsg.tool_calls ?? [];
+
+    // No tool calls → final answer
+    if (toolCalls.length === 0) {
+      console.log('[agent] Final answer produced.');
+      return assistantMsg.content ?? '';
+    }
+
+    console.log(`[agent] Tool calls requested: ${toolCalls.map(c => (c as any).function?.name).join(', ')}`);
+
+    // Push the assistant's tool-call turn so the model sees its own request
+    messages.push(assistantMsg as any);
+
+    // Execute each requested tool
     for (const call of toolCalls) {
-
-      if(call.type !== 'function' || !call.function){
-        console.log("tool not a function or missing function definition, skipping...");
-        continue; // currently only support function calls
-      }
+      if (call.type !== 'function' || !call.function) continue;
 
       const name = call.function.name;
       const args = safeParse(call.function.arguments || '{}');
-      console.log("Tool call name:", name, "args:", args);
+      console.log(`[agent] Running tool "${name}" with args:`, args);
 
       let result = '';
       if (name === 'get_time') result = await run_get_time();
       else if (name === 'read_file') result = await run_read_file(args);
-      else if (name === 'save_to_memory') await saveToMemory(args.key, args.value);
-      else if (name === 'remove_from_memory') await removeFromMemory(args.key);
+      else if (name === 'save_to_memory') result = await saveToMemory(args.key, args.value);
+      else if (name === 'remove_from_memory') result = await removeFromMemory(args.key);
       else if (name === 'create_file') result = await run_create_file(args);
+      else if (name === 'forget_document') result = await run_forget_document(args);
+      else if (name === 'ingest_documents') result = await run_ingest_documents();
+      else result = `Unknown tool: ${name}`;
 
-      toolResults.push({
+      messages.push({
         role: 'tool',
         name,
         tool_call_id: call.id,
-        content: result?.slice(0, 50_000) || '',
+        content: result.slice(0, 50_000),
       });
     }
-
-    console.log('Tool results to send back to model:', toolResults);
-
-    // 3) Send back the tool outputs in a follow-up request to get the final answer
-    const follow = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        ...messages,
-        first.choices[0]?.message as any,
-        ...toolResults,
-      ] as any,
-      temperature: 0.2,
-    });
-
-    console.log('Model final response after tool calls:', follow.choices?.[0]?.message);
-
-    return follow.choices?.[0]?.message?.content ?? '';
   }
 
-  // No tool call: return the first answer
-  return first.choices?.[0]?.message?.content ?? '';
+  console.warn('[agent] Reached maximum tool rounds without a final answer.');
+  return 'I was unable to produce a final answer within the allowed steps. Please try rephrasing your request.';
 }
 
 function safeParse(json: string) {
