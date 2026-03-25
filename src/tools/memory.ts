@@ -11,8 +11,8 @@ export const save_to_memory = {
                 key: { type: "string", description: "Memory key" },
                 value: { type: "string", description: "Memory value" }
             },
+            required: ["key", "value"]
         },
-        required: ["key", "value"]
     }
 }
 
@@ -25,9 +25,9 @@ export const remove_from_memory = {
             type: "object",
             properties: {
                 key: { type: "string", description: "Memory key to remove" },
-            }
-        },
-        required: ["key"]
+            },
+            required: ["key"]
+        }
     }
 }
 
