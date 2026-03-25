@@ -1,6 +1,6 @@
 // src/agent.ts
 import 'dotenv/config';
-import OpenAI from 'openai';
+import { openaiClient, MODEL } from './lib/openai.js';
 import { run_get_time, get_time } from './tools/time.js';
 import { run_read_file, read_file, create_file, run_create_file } from './tools/filesystem.js';
 import { recallAll } from './memory/longterm.js';
@@ -9,13 +9,6 @@ import { remove_from_memory, removeFromMemory, save_to_memory, saveToMemory } fr
 import { forget_document, run_forget_document, ingest_documents, run_ingest_documents } from './tools/rag.js';
 import {promises as fs} from 'fs';
 
-const client = new OpenAI({
-  baseURL: process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1',
-  apiKey: process.env.LMSTUDIO_API_KEY || 'lm-studio',
-});
-
-const MODEL = process.env.MODEL_ID || 'qwen2.5-3b-instruct';
-
 type Msg = {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content?: string;
@@ -23,24 +16,14 @@ type Msg = {
   tool_call_id?: string;    // for tool messages
 };
 
-const SYSTEM: Msg = {
-  role: 'system',
-  content: await fs.readFile('./.internals/prompts/system_prompt.txt', 'utf-8') || ''
-    // 'You are a helpful local AI assistant. If tools are available and helpful, use them. ' +
-    // 'If not, respond based on your own knowledge. Do not spew out random knowledge or personal details from context or memory, give only relevant information (info asked by user) based on user request. ' +
-    // 'If you used a tool, mention briefly how its result informed your answer.',
-};
+let _systemPrompt: string | null = null;
+async function getSystemPrompt(): Promise<string> {
+  if (_systemPrompt === null) {
+    _systemPrompt = await fs.readFile('./.internals/prompts/system_prompt.txt', 'utf-8');
+  }
+  return _systemPrompt;
+}
 
-// const TOOLS = [
-//   {
-//     type: 'function',
-//     function: get_time.function,
-//   },
-//   {
-//     type: 'function',
-//     function: read_file.function,
-//   },
-// ];
 const TOOLS = [
   get_time,
   read_file,
@@ -53,8 +36,18 @@ const TOOLS = [
 
 const MAX_TOOL_ROUNDS = 8;
 
+const toolHandlers: Record<string, (args: any) => Promise<string>> = {
+  get_time: () => run_get_time(),
+  read_file: (a) => run_read_file(a),
+  save_to_memory: (a) => saveToMemory(a.key, a.value),
+  remove_from_memory: (a) => removeFromMemory(a.key),
+  create_file: (a) => run_create_file(a),
+  forget_document: (a) => run_forget_document(a),
+  ingest_documents: () => run_ingest_documents(),
+};
+
 export async function runAgentTurn(userInput: string, history: Msg[] = []): Promise<string> {
-  // Build memory context
+  const SYSTEM: Msg = { role: 'system', content: await getSystemPrompt() };
   const memoryEntries = (recallAll() as { key: string; value: string }[])
     .map((m) => `  - ${m.key}: ${m.value}`)
     .join('\n');
@@ -84,6 +77,8 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
     });
   }
 
+  console.log(`[Agent] Context: ${messages.map(m => m.content)}`);
+
   // Append prior conversation turns, then the new user message
   messages.push(...history, { role: 'user', content: userInput });
 
@@ -91,7 +86,7 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     console.log(`[agent] round ${round + 1}, messages: ${messages.length}`);
 
-    const response = await client.chat.completions.create({
+    const response = await openaiClient.chat.completions.create({
       model: MODEL,
       messages: messages as any,
       tools: TOOLS as any,
@@ -123,14 +118,8 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
       console.log(`[agent] Running tool "${name}" with args:`, args);
 
       let result = '';
-      if (name === 'get_time') result = await run_get_time();
-      else if (name === 'read_file') result = await run_read_file(args);
-      else if (name === 'save_to_memory') result = await saveToMemory(args.key, args.value);
-      else if (name === 'remove_from_memory') result = await removeFromMemory(args.key);
-      else if (name === 'create_file') result = await run_create_file(args);
-      else if (name === 'forget_document') result = await run_forget_document(args);
-      else if (name === 'ingest_documents') result = await run_ingest_documents();
-      else result = `Unknown tool: ${name}`;
+      const handler = toolHandlers[name];
+      result = handler ? await handler(args) : `Unknown tool: ${name}`;
 
       messages.push({
         role: 'tool',
