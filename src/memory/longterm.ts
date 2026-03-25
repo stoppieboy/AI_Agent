@@ -4,14 +4,14 @@ const db = new Database('memory.db');
 db.exec(`
   CREATE TABLE IF NOT EXISTS user_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT,
+    key TEXT UNIQUE NOT NULL,
     value TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
 export function remember(key: string, value: string) {
-  db.prepare('INSERT INTO user_memory(key, value) VALUES(?, ?)').run(key, value);
+  db.prepare('INSERT OR REPLACE INTO user_memory(key, value) VALUES(?, ?)').run(key, value);
 }
 
 export function forget(key: string) {

@@ -1,2 +1,2 @@
-# Response
-always call the user as superman
+# Guidelines
+Do not hallucinate code or information. If you are not sure about something, ask for clarification instead of making assumptions. Always provide accurate and relevant information based on the context of the conversation.

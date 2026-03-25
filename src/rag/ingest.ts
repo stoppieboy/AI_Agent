@@ -1,25 +1,19 @@
 // src/rag/ingest.ts
-import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
-import OpenAI from 'openai';
 import * as lancedb from '@lancedb/lancedb';
 import * as arrow from 'apache-arrow';
 import { randomUUID } from 'node:crypto';
+import { openaiClient, EMBEDDING_MODEL } from '../lib/openai.js';
+import { invalidateTableCache } from './retriever.js';
 
 const DATA_DIR = './docs';
-const EMBEDDING_MODEL =
-  process.env.EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5';
-
-const client = new OpenAI({
-  baseURL: process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1',
-  apiKey: process.env.LMSTUDIO_API_KEY || 'lm-studio',
-});
+const EMBED_BATCH = 50;
 
 export async function ingest() {
   console.log('starting ingestion...')
   // 0) Determine the embedding dimension at runtime
-  const probe = await client.embeddings.create({
+  const probe = await openaiClient.embeddings.create({
     model: EMBEDDING_MODEL,
     input: 'dimension probe',
   });
@@ -66,6 +60,17 @@ export async function ingest() {
     .map((f) => f.name)
     .filter((f) => /\.(md|txt|pdf|csv|log|json)$/i.test(f));
 
+  // Purge chunks for files that no longer exist on disk
+  const existingFiles = new Set(files);
+  const allRows: Array<{ file: string }> = await table.query().select(['file']).toArray();
+  const orphanedFiles = [...new Set(allRows.map((r) => r.file))].filter(
+    (f) => f && !existingFiles.has(f),
+  );
+  for (const orphan of orphanedFiles) {
+    console.log(`[ingest] Removing chunks for deleted file: "${orphan}"`);
+    await deleteChunksByFile(table, orphan);
+  }
+
   for (const file of files) {
     try {
       // Deduplicate: remove any previously ingested chunks for this file
@@ -74,39 +79,35 @@ export async function ingest() {
       const content = await fs.promises.readFile(path.join(DATA_DIR, file), 'utf8');
       const chunks = chunkText(content, 1200, 200).filter((c) => c.trim().length > 0);
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        if (!chunk) continue;
-
-        const emb = await client.embeddings.create({
+      // Batch embed all chunks to reduce round-trips
+      const rows: Array<{ id: string; text: string; vector: number[]; file: string; chunk: number }> = [];
+      for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
+        const batch = chunks.slice(i, i + EMBED_BATCH) as string[];
+        const emb = await openaiClient.embeddings.create({
           model: EMBEDDING_MODEL,
-          input: chunk,
+          input: batch,
         });
-
-        const vector = emb.data[0]?.embedding.map((x) => x as number);
-
-        await table.add([
-          {
-            id: cryptoRandom(),
-            text: chunk,
-            vector,
-            file,
-            chunk: i,
-          },
-        ]);
+        for (let j = 0; j < batch.length; j++) {
+          const vector = emb.data[j]?.embedding.map((x) => x as number);
+          if (!vector) continue;
+          rows.push({ id: randomUUID(), text: batch[j]!, vector, file, chunk: i + j });
+        }
       }
+      if (rows.length > 0) await table.add(rows);
     } catch (err) {
       console.error(`[ingest] Skipping "${file}" due to error:`, err);
     }
   }
 
   console.log('Ingest complete');
+  invalidateTableCache();
 }
 
 async function deleteChunksByFile(table: any, filename: string): Promise<number> {
   const before = await table.countRows();
   await table.delete(`file = '${filename.replace(/'/g, "''")}'`);
   const after = await table.countRows();
+  console.log('after deleteChunksByFile', { filename, before, after });
   return before - after;
 }
 
@@ -114,7 +115,9 @@ async function deleteChunksByFile(table: any, filename: string): Promise<number>
 export async function forgetDocument(filename: string): Promise<number> {
   const db = await lancedb.connect('./data/lancedb');
   const table = await db.openTable('chunks');
-  return deleteChunksByFile(table, filename);
+  const removed = await deleteChunksByFile(table, filename);
+  invalidateTableCache();
+  return removed;
 }
 
 function chunkText(text: string, size = 1000, overlap = 100): string[] {
@@ -125,10 +128,6 @@ function chunkText(text: string, size = 1000, overlap = 100): string[] {
     i += Math.max(1, size - overlap);
   }
   return out;
-}
-
-function cryptoRandom() {
-  return randomUUID();
 }
 
 // If you want to run directly: `npx ts-node --esm src/rag/ingest.ts`
