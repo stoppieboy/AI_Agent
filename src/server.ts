@@ -2,25 +2,28 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import OpenAI from 'openai';
 import { runAgentTurn } from './agent.js';
+import { openaiClient, MODEL } from './lib/openai.js';
 
 const app = express();
-app.use(cors());
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : ['http://localhost:3000', 'http://127.0.0.1:3000'];
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
-const client = new OpenAI({
-  baseURL: process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1',
-  apiKey: process.env.LMSTUDIO_API_KEY || 'lm-studio',
-});
-
-const MODEL = process.env.MODEL_ID || 'qwen2.5-3b-instruct';
-
+const MAX_HISTORY = 50;
+const VALID_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
 // ---- Non-streaming chat (simple) ----
 app.post('/chat', async (req, res) => {
   try {
-    const { messages } = req.body; // [{role, content}, ...]
-    const r = await client.chat.completions.create({
+    const { messages } = req.body as { messages?: unknown };
+    if (!Array.isArray(messages) || messages.length === 0) {
+      res.status(400).json({ error: 'messages must be a non-empty array' });
+      return;
+    }
+    const r = await openaiClient.chat.completions.create({
       model: MODEL,
       messages,
       temperature: 0.7,
@@ -38,10 +41,15 @@ app.post('/chat/stream', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.flushHeaders?.();
 
-  const { messages } = req.body;
+  const { messages } = req.body as { messages?: unknown };
+  if (!Array.isArray(messages) || messages.length === 0) {
+    res.write(`data: ${JSON.stringify({ error: 'messages must be a non-empty array' })}\n\n`);
+    res.end();
+    return;
+  }
 
   try {
-    const stream = await client.chat.completions.create({
+    const stream = await openaiClient.chat.completions.create({
       model: MODEL,
       messages,
       stream: true,
@@ -65,8 +73,24 @@ app.post('/chat/stream', async (req, res) => {
 // Body: { userInput: string, history?: Array<{role, content}> }
 app.post('/agent', async (req, res) => {
   try {
-    const { userInput, history } = req.body;
-    const answer = await runAgentTurn(userInput, history ?? []);
+    const { userInput, history } = req.body as { userInput?: unknown; history?: unknown };
+    if (typeof userInput !== 'string' || !userInput.trim()) {
+      res.status(400).json({ error: 'userInput must be a non-empty string' });
+      return;
+    }
+    const sanitizedHistory = Array.isArray(history)
+      ? history
+          .slice(-MAX_HISTORY)
+          .filter(
+            (m): m is { role: string; content: string } =>
+              m != null &&
+              typeof m === 'object' &&
+              VALID_ROLES.has((m as any).role) &&
+              typeof (m as any).content === 'string',
+          )
+      : [];
+    console.log(`[Agent History]`, sanitizedHistory);
+    const answer = await runAgentTurn(userInput, sanitizedHistory as any);
     res.json({ answer });
   } catch (err: any) {
     console.error(err);
