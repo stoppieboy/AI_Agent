@@ -46,36 +46,30 @@ const toolHandlers: Record<string, (args: any) => Promise<string>> = {
   ingest_documents: () => run_ingest_documents(),
 };
 
+async function buildContextMsg(query: string, memoryEntries: string): Promise<Msg | null> {
+  let ragContext = '';
+  try {
+    const top = await retrieveSimilar(query, 5);
+    if (top?.length) ragContext = top.join('\n---\n');
+  } catch {
+    console.error('RAG retrieval failed, continuing without context.');
+  }
+  const parts: string[] = [];
+  if (memoryEntries) parts.push(`<memory>\n${memoryEntries}\n</memory>`);
+  if (ragContext) parts.push(`<knowledge>\n${ragContext}\n</knowledge>`);
+  if (parts.length === 0) return null;
+  return { role: 'system', content: `Context for this conversation:\n${parts.join('\n\n')}` };
+}
+
 export async function runAgentTurn(userInput: string, history: Msg[] = []): Promise<string> {
   const SYSTEM: Msg = { role: 'system', content: await getSystemPrompt() };
   const memoryEntries = (recallAll() as { key: string; value: string }[])
     .map((m) => `  - ${m.key}: ${m.value}`)
     .join('\n');
 
-  // Optional RAG: fetch top-k chunks related to the query
-  let ragContext = '';
-  try {
-    const top = await retrieveSimilar(userInput, 5);
-    if (top?.length) {
-      ragContext = top.join('\n---\n');
-    }
-  } catch {
-    console.error('RAG retrieval failed, continuing without context.');
-  }
-
-  // Inject memory and RAG as a separate context message so the user turn stays clean
-  const contextParts: string[] = [];
-  if (memoryEntries) contextParts.push(`<memory>\n${memoryEntries}\n</memory>`);
-  if (ragContext) contextParts.push(`<knowledge>\n${ragContext}\n</knowledge>`);
-
   const messages: Msg[] = [SYSTEM];
-
-  if (contextParts.length > 0) {
-    messages.push({
-      role: 'system',
-      content: `Context for this conversation:\n${contextParts.join('\n\n')}`,
-    });
-  }
+  const ctxMsg = await buildContextMsg(userInput, memoryEntries);
+  if (ctxMsg) messages.push(ctxMsg);
 
   console.log(`[Agent] Context: ${messages.map(m => m.content)}`);
 
@@ -127,6 +121,20 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
         tool_call_id: call.id,
         content: result.slice(0, 50_000),
       });
+
+      // After ingestion, refresh the RAG context message in-place
+      if (name === 'ingest_documents') {
+        const fresh = await buildContextMsg(userInput, memoryEntries);
+        const ctxIdx = messages.findIndex(
+          (m) => m.role === 'system' && m.content?.startsWith('Context for this conversation:'),
+        );
+        if (fresh) {
+          if (ctxIdx !== -1) messages[ctxIdx] = fresh;
+          else messages.splice(1, 0, fresh);
+        } else if (ctxIdx !== -1) {
+          messages.splice(ctxIdx, 1);
+        }
+      }
     }
   }
 
