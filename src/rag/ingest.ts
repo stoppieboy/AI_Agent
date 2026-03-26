@@ -103,7 +103,14 @@ export async function ingest() {
   invalidateTableCache();
 }
 
+function assertSafeFilename(filename: string): void {
+  if (!filename || filename.includes('..') || /[/\\'"`;\t\r\n]/.test(filename)) {
+    throw new Error(`[ingest] Unsafe filename rejected: "${filename}"`);
+  }
+}
+
 async function deleteChunksByFile(table: any, filename: string): Promise<number> {
+  assertSafeFilename(filename);
   const before = await table.countRows();
   await table.delete(`file = '${filename.replace(/'/g, "''")}'`);
   const after = await table.countRows();
