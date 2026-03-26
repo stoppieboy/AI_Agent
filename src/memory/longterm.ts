@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
-const db = new Database('memory.db');
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const db = new Database(path.join(PROJECT_ROOT, 'memory.db'));
 db.exec(`
   CREATE TABLE IF NOT EXISTS user_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,6 +23,11 @@ export function forget(key: string) {
 }
 
 export function recallAll() {
-  return db.prepare('SELECT key, value FROM user_memory ORDER BY id DESC LIMIT 100').all();
+  const MEMORY_LIMIT = 100;
+  return db.prepare('SELECT key, value FROM user_memory ORDER BY id DESC LIMIT ?').all(MEMORY_LIMIT);
+}
+
+export function closeDb() {
+  db.close();
 }
 
