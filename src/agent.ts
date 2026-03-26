@@ -1,6 +1,9 @@
 // src/agent.ts
 import 'dotenv/config';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { openaiClient, MODEL } from './lib/openai.js';
+import { MAX_CONTENT_CHARS } from './lib/constants.js';
 import { run_get_time, get_time } from './tools/time.js';
 import { run_read_file, read_file, create_file, run_create_file } from './tools/filesystem.js';
 import { recallAll } from './memory/longterm.js';
@@ -8,6 +11,8 @@ import { retrieveSimilar } from './rag/retriever.js';
 import { remove_from_memory, removeFromMemory, save_to_memory, saveToMemory } from './tools/memory.js';
 import { forget_document, run_forget_document, ingest_documents, run_ingest_documents } from './tools/rag.js';
 import {promises as fs} from 'fs';
+
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 type Msg = {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -19,7 +24,10 @@ type Msg = {
 let _systemPrompt: string | null = null;
 async function getSystemPrompt(): Promise<string> {
   if (_systemPrompt === null) {
-    _systemPrompt = await fs.readFile('./.internals/prompts/system_prompt.txt', 'utf-8');
+    _systemPrompt = await fs.readFile(
+      path.join(PROJECT_ROOT, '.internals/prompts/system_prompt.txt'),
+      'utf-8',
+    );
   }
   return _systemPrompt;
 }
@@ -61,7 +69,13 @@ async function buildContextMsg(query: string, memoryEntries: string): Promise<Ms
   return { role: 'system', content: `Context for this conversation:\n${parts.join('\n\n')}` };
 }
 
-export async function runAgentTurn(userInput: string, history: Msg[] = []): Promise<string> {
+export type AgentEvent = { type: 'tool'; name: string } | { type: 'token'; content: string };
+
+export async function runAgentTurn(
+  userInput: string,
+  history: Msg[] = [],
+  onEvent?: (event: AgentEvent) => void,
+): Promise<string> {
   const SYSTEM: Msg = { role: 'system', content: await getSystemPrompt() };
   const memoryEntries = (recallAll() as { key: string; value: string }[])
     .map((m) => `  - ${m.key}: ${m.value}`)
@@ -95,7 +109,13 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
     // No tool calls → final answer
     if (toolCalls.length === 0) {
       console.log('[agent] Final answer produced.');
-      return assistantMsg.content ?? '';
+      const content = assistantMsg.content ?? '';
+      if (onEvent) {
+        for (const chunk of (content.match(/\S+\s*/g) ?? [content])) {
+          onEvent({ type: 'token', content: chunk });
+        }
+      }
+      return content;
     }
 
     console.log(`[agent] Tool calls requested: ${toolCalls.map(c => (c as any).function?.name).join(', ')}`);
@@ -110,6 +130,7 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
       const name = call.function.name;
       const args = safeParse(call.function.arguments || '{}');
       console.log(`[agent] Running tool "${name}" with args:`, args);
+      onEvent?.({ type: 'tool', name });
 
       let result = '';
       const handler = toolHandlers[name];
@@ -119,7 +140,7 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
         role: 'tool',
         name,
         tool_call_id: call.id,
-        content: result.slice(0, 50_000),
+        content: result.slice(0, MAX_CONTENT_CHARS),
       });
 
       // After ingestion, refresh the RAG context message in-place
@@ -145,7 +166,8 @@ export async function runAgentTurn(userInput: string, history: Msg[] = []): Prom
 function safeParse(json: string) {
   try {
     return JSON.parse(json);
-  } catch {
+  } catch (err) {
+    console.error('[agent] Failed to parse tool arguments:', err, '| Raw:', json);
     return {};
   }
 }
