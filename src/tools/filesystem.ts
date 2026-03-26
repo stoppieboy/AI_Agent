@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { MAX_CONTENT_CHARS } from '../lib/constants.js';
 
 const WORKSPACE_ROOT = path.resolve(process.cwd());
 
@@ -49,7 +50,7 @@ export const create_file = {
 export async function run_read_file(args: { path: string }) {
   const safe = resolveSafe(args.path);
   const content = await fs.readFile(safe, 'utf8');
-  return content.slice(0, 50_000);
+  return content.slice(0, MAX_CONTENT_CHARS);
 }
 
 export async function run_create_file(args: { path: string; content: string }) {
