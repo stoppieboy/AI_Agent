@@ -3,6 +3,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { runAgentTurn, type AgentEvent } from './agent.js';
 import { openaiClient, MODEL } from './lib/openai.js';
 import { ingest, forgetDocument } from './rag/ingest.js';
@@ -14,13 +16,17 @@ const app = express();
 (['LMSTUDIO_BASE_URL', 'LMSTUDIO_API_KEY', 'MODEL_ID', 'EMBEDDING_MODEL', 'ALLOWED_ORIGINS'] as const)
   .forEach((key) => { if (!process.env[key]) console.warn(`[config] ${key} not set, using default.`); });
 
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const CLIENT_DIR   = path.join(PROJECT_ROOT, 'client');
+
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
-  : ['http://localhost:3000', 'http://127.0.0.1:3000'];
+  : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://127.0.0.1:1234'];
 const MAX_HISTORY = 50;
 const VALID_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
 
-app.use(cors({ origin: allowedOrigins }));
+// Allow null origin so the HTML file can be opened directly from the filesystem
+app.use(cors({ origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)) }));
 app.use(express.json({ limit: '100kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 100, standardHeaders: true, legacyHeaders: false }));
 
@@ -119,6 +125,8 @@ app.post('/agent', async (req, res) => {  try {
     res.status(500).json({ error: err?.message || 'agent_error' });
   }
 });
+
+app.use(express.static(CLIENT_DIR));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
