@@ -124,7 +124,6 @@
     #settings-panel {
       padding: 12px;
       border-top: 1px solid var(--border);
-      margin-top: auto;
       display: flex;
       flex-direction: column;
       gap: 10px;
@@ -190,6 +189,7 @@
       flex-direction: column;
       min-width: 0;
       overflow: hidden;
+      position: relative;
     }
 
     /* ── Top bar ── */
@@ -282,6 +282,7 @@
       font-size: 14px;
       line-height: 1.65;
       word-break: break-word;
+      position: relative;
     }
 
     .msg-row.user .bubble {
@@ -518,6 +519,88 @@
       #input-area { padding: 12px 12px 16px; }
       #topbar { padding: 10px 12px; }
     }
+
+    /* ── Conversation list ── */
+    #convo-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 8px;
+      min-height: 0;
+    }
+    #convo-list::-webkit-scrollbar { width: 4px; }
+    #convo-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .convo-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 13px;
+      transition: background 150ms, color 150ms;
+    }
+    .convo-item:hover { background: var(--bg-elevated); color: var(--text); }
+    .convo-item.active { background: var(--tool-bg); color: var(--tool-text); }
+    .convo-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .convo-del {
+      background: none; border: none; color: var(--text-muted);
+      font-size: 14px; cursor: pointer; padding: 2px 4px;
+      border-radius: 4px; opacity: 0;
+      transition: opacity 150ms, color 150ms;
+      flex-shrink: 0; line-height: 1;
+    }
+    .convo-item:hover .convo-del { opacity: 1; }
+    .convo-del:hover { color: var(--error); }
+
+    /* ── Copy message button ── */
+    .msg-copy-btn {
+      position: absolute; top: 6px; right: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 5px;
+      padding: 3px 8px;
+      font-size: 11px; cursor: pointer;
+      opacity: 0;
+      transition: opacity 150ms, background 150ms;
+    }
+    .msg-row.assistant .bubble:hover .msg-copy-btn { opacity: 1; }
+    .msg-copy-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .msg-copy-btn.copied { background: #4ade80; color: #000; border-color: #4ade80; opacity: 1; }
+
+    /* ── Scroll to bottom ── */
+    #scroll-btn {
+      position: absolute;
+      bottom: 90px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 20px;
+      padding: 6px 16px;
+      font-size: 12px; cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 200ms, background 150ms;
+      z-index: 10;
+    }
+    #scroll-btn.show { opacity: 1; pointer-events: auto; }
+    #scroll-btn:hover { border-color: var(--primary); color: var(--text); background: var(--bg-elevated); }
+
+    /* ── Stop button ── */
+    #send-btn.stop { background: var(--error); }
+    #send-btn.stop:hover { background: #e05252; }
+    #send-btn.stop .send-icon { display: none; }
+    #send-btn.stop::after {
+      content: '';
+      width: 12px; height: 12px;
+      background: #fff;
+      border-radius: 2px;
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -532,6 +615,9 @@
       <span aria-hidden="true">＋</span> New conversation
     </button>
   </div>
+
+  <div class="sidebar-label">Conversations</div>
+  <div id="convo-list" role="list" aria-label="Conversation history"></div>
 
   <div id="settings-panel">
     <div class="settings-row">
@@ -573,6 +659,8 @@
       </div>
     </div>
   </div>
+
+  <button id="scroll-btn" aria-label="Scroll to latest message" title="Scroll to bottom">↓ Latest</button>
 
   <div id="input-area">
     <div id="input-wrap">
@@ -619,6 +707,14 @@
   let history = [];         // { role, content }[]
   let mode    = 'agent';    // 'agent' | 'chat'
   let busy    = false;
+  let abortController = null;
+  let currentConvoId  = null;
+
+  const MAX_STORED_CONVOS = 20;
+  let conversations = (() => {
+    try { return JSON.parse(localStorage.getItem('conversations') || '[]'); }
+    catch { return []; }
+  })();
 
   const serverUrl  = () => document.getElementById('server-url').value.replace(/\/$/, '');
   const messagesEl = document.getElementById('messages');
@@ -627,6 +723,7 @@
   const emptyState = document.getElementById('empty-state');
   const statusDot  = document.getElementById('status-dot');
   const toastEl    = document.getElementById('toast');
+  const scrollBtn  = document.getElementById('scroll-btn');
 
   // ── Connection health ──────────────────────────────
   async function checkHealth() {
@@ -689,8 +786,79 @@
     });
   });
 
+  // ── Conversation persistence ──────────────────────
+  function saveCurrentConvo() {
+    if (!history.length) return;
+    const preview = (history.find(m => m.role === 'user')?.content || 'Conversation').slice(0, 60);
+    const existing = conversations.find(c => c.id === currentConvoId);
+    if (existing) {
+      existing.history = [...history];
+      existing.updated = Date.now();
+    } else {
+      currentConvoId = Date.now().toString();
+      conversations.unshift({ id: currentConvoId, preview, history: [...history], updated: Date.now() });
+      if (conversations.length > MAX_STORED_CONVOS) conversations = conversations.slice(0, MAX_STORED_CONVOS);
+    }
+    localStorage.setItem('conversations', JSON.stringify(conversations));
+    renderConvoList();
+  }
+
+  function loadConvo(id) {
+    const convo = conversations.find(c => c.id === id);
+    if (!convo) return;
+    currentConvoId = id;
+    history = [...convo.history];
+    messagesEl.innerHTML = '';
+    if (emptyState.parentNode) emptyState.remove();
+    history.forEach(m => {
+      if (m.role === 'user' || m.role === 'assistant') appendMessage(m.role, m.content);
+    });
+    renderConvoList();
+    closeSidebar();
+    setTimeout(() => messagesEl.scrollTo({ top: messagesEl.scrollHeight }), 0);
+  }
+
+  function deleteConvo(id, e) {
+    e.stopPropagation();
+    conversations = conversations.filter(c => c.id !== id);
+    localStorage.setItem('conversations', JSON.stringify(conversations));
+    if (currentConvoId === id) {
+      currentConvoId = null;
+      history = [];
+      messagesEl.innerHTML = '';
+      messagesEl.appendChild(emptyState);
+      emptyState.style.display = '';
+    }
+    renderConvoList();
+  }
+
+  function renderConvoList() {
+    const list = document.getElementById('convo-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!conversations.length) {
+      list.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--text-muted)">No saved conversations</div>';
+      return;
+    }
+    conversations.forEach(convo => {
+      const item = document.createElement('div');
+      item.className = 'convo-item' + (convo.id === currentConvoId ? ' active' : '');
+      item.setAttribute('role', 'listitem');
+      item.setAttribute('tabindex', '0');
+      item.setAttribute('aria-label', convo.preview);
+      item.innerHTML = `<span>${escHtml(convo.preview)}</span><button class="convo-del" aria-label="Delete conversation" title="Delete">✕</button>`;
+      item.addEventListener('click', () => loadConvo(convo.id));
+      item.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadConvo(convo.id); } });
+      item.querySelector('.convo-del').addEventListener('click', e => deleteConvo(convo.id, e));
+      list.appendChild(item);
+    });
+  }
+  renderConvoList();
+
   // ── New chat ──────────────────────────────────────
   document.getElementById('new-chat-btn').addEventListener('click', () => {
+    saveCurrentConvo();
+    currentConvoId = null;
     history = [];
     messagesEl.innerHTML = '';
     messagesEl.appendChild(emptyState);
@@ -718,6 +886,14 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!sendBtn.disabled) send(); }
   });
 
+  // ── Scroll to bottom button ────────────────────────
+  function updateScrollBtn() {
+    const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+    scrollBtn.classList.toggle('show', !atBottom && messagesEl.scrollHeight > messagesEl.clientHeight);
+  }
+  messagesEl.addEventListener('scroll', updateScrollBtn, { passive: true });
+  scrollBtn.addEventListener('click', () => messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }));
+
   // ── Append message ────────────────────────────────
   function appendMessage(role, content = '', { streaming = false } = {}) {
     if (emptyState.parentNode) emptyState.remove();
@@ -744,6 +920,21 @@
       bubble._cursor = cursor;
     }
 
+    if (role === 'assistant') {
+      const copyMsgBtn = document.createElement('button');
+      copyMsgBtn.className = 'msg-copy-btn';
+      copyMsgBtn.textContent = 'Copy';
+      copyMsgBtn.setAttribute('aria-label', 'Copy message');
+      copyMsgBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(bubble._raw || '').then(() => {
+          copyMsgBtn.textContent = 'Copied!';
+          copyMsgBtn.classList.add('copied');
+          setTimeout(() => { copyMsgBtn.textContent = 'Copy'; copyMsgBtn.classList.remove('copied'); }, 2000);
+        });
+      });
+      bubble.appendChild(copyMsgBtn);
+    }
+
     row.appendChild(av);
     row.appendChild(bubble);
     messagesEl.appendChild(row);
@@ -761,7 +952,7 @@
     bubble._raw = text;
     bubble._contentEl.innerHTML = marked.parse(text);
     if (streaming && bubble._cursor) {
-      bubble.appendChild(bubble._cursor); // keep cursor after content
+      bubble.appendChild(bubble._cursor);
     }
   }
 
@@ -775,15 +966,14 @@
     pill.className = 'tool-pill';
     pill.innerHTML = `<div class="tool-spinner" aria-hidden="true"></div><span>Using <strong>${escHtml(toolName)}</strong>…</span>`;
     pill.setAttribute('aria-label', `Tool in progress: ${toolName}`);
-    // insert before the content
     bubble.insertBefore(pill, bubble._contentEl);
     return pill;
   }
 
   function resolveToolPill(pill, toolName) {
     pill.innerHTML = `<span style="opacity:0.7">✓ Used <strong>${escHtml(toolName)}</strong></span>`;
-    pill.style.animationDuration = '0ms';
-    setTimeout(() => pill.style.opacity = '0.6', 0);
+    pill.style.transition = 'opacity 400ms ease-out';
+    setTimeout(() => { pill.style.opacity = '0.6'; }, 0);
   }
 
   function escHtml(s) {
@@ -792,6 +982,12 @@
 
   function scrollToBottom() {
     messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+    updateScrollBtn();
+  }
+
+  // ── Stop streaming ────────────────────────────────
+  function stopStream() {
+    abortController?.abort();
   }
 
   // ── Send ──────────────────────────────────────────
@@ -800,8 +996,9 @@
     if (!text || busy) return;
 
     busy = true;
-    sendBtn.disabled = true;
-    sendBtn.classList.add('loading');
+    sendBtn.disabled = false;
+    sendBtn.classList.add('stop');
+    sendBtn.setAttribute('aria-label', 'Stop generating');
     inputEl.value = '';
     inputEl.style.height = 'auto';
 
@@ -815,25 +1012,32 @@
         await sendChatStream(text);
       }
     } catch (err) {
-      showToast(err.message || 'Something went wrong');
+      if (err.name !== 'AbortError') showToast(err.message || 'Something went wrong');
     } finally {
       busy = false;
-      sendBtn.classList.remove('loading');
+      abortController = null;
+      sendBtn.classList.remove('stop');
+      sendBtn.setAttribute('aria-label', 'Send message');
       sendBtn.disabled = !inputEl.value.trim();
       inputEl.focus();
+      saveCurrentConvo();
     }
   }
 
+  sendBtn.addEventListener('click', () => { if (busy) stopStream(); else send(); });
+
   // ── Agent streaming ───────────────────────────────
   async function sendAgentStream(userInput) {
+    abortController = new AbortController();
     const aiBubble = appendMessage('assistant', '', { streaming: true });
-    const activePills = new Map(); // toolName → pill element
+    const activePills = new Map();
     let accText = '';
 
     const response = await fetch(`${serverUrl()}/agent/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userInput, history: history.slice(0, -1) }),
+      signal: abortController.signal,
     });
 
     if (!response.ok) {
@@ -845,52 +1049,61 @@
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        let event;
-        try { event = JSON.parse(line.slice(6)); } catch { continue; }
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
-        if (event.type === 'tool') {
-          const pill = appendToolPill(aiBubble, event.name);
-          activePills.set(event.name, pill);
-          scrollToBottom();
-        } else if (event.type === 'token') {
-          // Resolve any pending tool pills since we're now getting tokens
-          activePills.forEach((pill, name) => { resolveToolPill(pill, name); });
-          activePills.clear();
-          accText += event.content;
-          renderBubble(aiBubble, accText, true);
-          scrollToBottom();
-        } else if (event.type === 'done') {
-          finalizeBubble(aiBubble);
-          scrollToBottom();
-        } else if (event.type === 'error') {
-          finalizeBubble(aiBubble);
-          throw new Error(event.message);
+          if (event.type === 'tool') {
+            const pill = appendToolPill(aiBubble, event.name);
+            activePills.set(event.name, pill);
+            scrollToBottom();
+          } else if (event.type === 'token') {
+            activePills.forEach((pill, name) => { resolveToolPill(pill, name); });
+            activePills.clear();
+            accText += event.content;
+            renderBubble(aiBubble, accText, true);
+            scrollToBottom();
+          } else if (event.type === 'done') {
+            finalizeBubble(aiBubble);
+            scrollToBottom();
+          } else if (event.type === 'error') {
+            finalizeBubble(aiBubble);
+            throw new Error(event.message);
+          }
         }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        finalizeBubble(aiBubble);
+      } else {
+        throw err;
       }
     }
 
     finalizeBubble(aiBubble);
-    history.push({ role: 'assistant', content: accText });
+    if (accText) history.push({ role: 'assistant', content: accText });
   }
 
   // ── Chat streaming ────────────────────────────────
   async function sendChatStream(userInput) {
+    abortController = new AbortController();
     const msgs = history.map(m => ({ role: m.role, content: m.content }));
 
     const response = await fetch(`${serverUrl()}/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: msgs }),
+      signal: abortController.signal,
     });
 
     if (!response.ok) {
@@ -905,39 +1118,44 @@
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        let event;
-        try { event = JSON.parse(line.slice(6)); } catch { continue; }
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
-        if (event.token) {
-          accText += event.token;
-          renderBubble(aiBubble, accText, true);
-          scrollToBottom();
-        } else if (event.done) {
-          finalizeBubble(aiBubble);
-          scrollToBottom();
-        } else if (event.error) {
-          finalizeBubble(aiBubble);
-          throw new Error(event.error);
+          if (event.token) {
+            accText += event.token;
+            renderBubble(aiBubble, accText, true);
+            scrollToBottom();
+          } else if (event.done) {
+            finalizeBubble(aiBubble);
+            scrollToBottom();
+          } else if (event.error) {
+            finalizeBubble(aiBubble);
+            throw new Error(event.error);
+          }
         }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        finalizeBubble(aiBubble);
+      } else {
+        throw err;
       }
     }
 
     finalizeBubble(aiBubble);
-    history.push({ role: 'assistant', content: accText });
+    if (accText) history.push({ role: 'assistant', content: accText });
   }
-
-  // ── Send button ───────────────────────────────────
-  sendBtn.addEventListener('click', send);
 
   // Update send button when server URL changes
   document.getElementById('server-url').addEventListener('change', checkHealth);
