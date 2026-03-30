@@ -17,11 +17,13 @@ const app = express();
   .forEach((key) => { if (!process.env[key]) console.warn(`[config] ${key} not set, using default.`); });
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CLIENT_DIR   = path.join(PROJECT_ROOT, 'client');
+// In production, Express serves the Vite build output.
+// Run `npm run build:client` first, then `npm start`.
+const CLIENT_DIR   = path.join(PROJECT_ROOT, 'client', 'dist');
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
-  : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://127.0.0.1:1234'];
+  : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'];
 const MAX_HISTORY = 50;
 const VALID_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
 
