@@ -5,8 +5,11 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "build:client": "cd client && npm install && npm run build",
+    "build:all": "npm run build:client && npm run build",
     "start": "node dist/server.js",
     "dev": "nodemon --exec ts-node-esm src/server.ts",
+    "dev:client": "cd client && npm run dev",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
