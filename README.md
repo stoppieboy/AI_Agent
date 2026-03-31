@@ -1,6 +1,6 @@
 <div align="center">
 
-# ✦ Sage - AI Assistant
+# ✦ Sage - AI Agent
 
 **A self-hosted AI agent with RAG, long-term memory, tool use, and a streaming chat UI — powered by any OpenAI-compatible local model.**
 
