@@ -1,6 +1,6 @@
 <div align="center">
 
-# ✦ AI Assistant
+# ✦ Sage - AI Agent
 
 **A self-hosted AI agent with RAG, long-term memory, tool use, and a streaming chat UI — powered by any OpenAI-compatible local model.**
 
@@ -10,7 +10,7 @@
 [![LanceDB](https://img.shields.io/badge/LanceDB-vector%20store-CF6679)](https://lancedb.com/)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue)](LICENSE)
 
-![screenshot placeholder](https://placehold.co/900x500/0f1117/6366f1?text=AI+Assistant+UI&font=inter)
+![screenshot placeholder](https://placehold.co/900x500/0f1117/6366f1?text=Sage&font=inter)
 
 </div>
 
