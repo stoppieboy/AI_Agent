@@ -69,6 +69,7 @@ app.post('/chat', async (req, res) => {
 app.post('/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
+  res.socket?.setNoDelay(true);
   res.flushHeaders?.();
 
   const { messages } = req.body as { messages?: unknown };
@@ -140,6 +141,7 @@ app.get('/health', (_req, res) => {
 app.post('/agent/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
+  res.socket?.setNoDelay(true);
   res.flushHeaders?.();
 
   const send = (data: AgentEvent | { type: 'done' } | { type: 'error'; message: string }) =>

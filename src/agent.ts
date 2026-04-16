@@ -108,14 +108,28 @@ export async function runAgentTurn(
 
     // No tool calls → final answer
     if (toolCalls.length === 0) {
-      console.log('[agent] Final answer produced.');
-      const content = assistantMsg.content ?? '';
+      console.log('[agent] Final answer produced, streaming response...');
       if (onEvent) {
-        for (const chunk of (content.match(/\S+\s*/g) ?? [content])) {
-          onEvent({ type: 'token', content: chunk });
+        // Re-request with streaming so tokens are emitted as they arrive
+        const finalStream = await openaiClient.chat.completions.create({
+          model: MODEL,
+          messages: messages as any,
+          tools: TOOLS as any,
+          tool_choice: 'none',
+          temperature: 0.3,
+          stream: true,
+        });
+        let content = '';
+        for await (const chunk of finalStream) {
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) {
+            content += delta;
+            onEvent({ type: 'token', content: delta });
+          }
         }
+        return content;
       }
-      return content;
+      return assistantMsg.content ?? '';
     }
 
     console.log(`[agent] Tool calls requested: ${toolCalls.map(c => (c as any).function?.name).join(', ')}`);
